@@ -16,6 +16,7 @@ The script:
 from __future__ import annotations
 
 import argparse
+import warnings
 from pathlib import Path
 
 import torch
@@ -27,6 +28,8 @@ from tqdm import tqdm
 
 from data import StarTrackerDataset, collate_fn
 from model import SIFTERN
+
+warnings.filterwarnings("ignore", message=".*nested tensor.*", module="torch")
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +56,25 @@ def parse_args() -> argparse.Namespace:
         help="Sensor side length in pixels (used to locate the image center)",
     )
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument(
+        "--catalog",
+        default="data/filter-catalog.csv",
+        help="Path to filter-catalog.csv",
+    )
+    parser.add_argument(
+        "--dec-range",
+        type=float,
+        nargs=2,
+        metavar=("MIN_DEG", "MAX_DEG"),
+        required=True,
+        help="Declination bounds of the sky partition, e.g. --dec-range 0 6",
+    )
+    parser.add_argument(
+        "--half-fov",
+        type=float,
+        default=6.0,
+        help="Half the camera FOV in degrees (default 6.0 for a 12° FOV)",
+    )
     parser.add_argument(
         "--resume",
         action="store_true",
@@ -167,6 +189,9 @@ def save_checkpoint(
             "star_id_to_idx": dataset.star_id_to_idx,
             "idx_to_star_id": dataset.idx_to_star_id,
             "n_classes": dataset.n_classes,
+            "catalog_path": str(dataset._catalog_path),
+            "dec_range": dataset._dec_range,
+            "half_fov": dataset._half_fov,
             "val_loss": val_loss,
         },
         path,
@@ -185,8 +210,12 @@ def main() -> None:
 
     # --- Dataset ---
     print("Loading dataset...")
+    dec_range = tuple(args.dec_range)
     dataset = StarTrackerDataset(
         path=args.data,
+        catalog_path=args.catalog,
+        dec_range=dec_range,
+        half_fov=args.half_fov,
         image_size=args.image_size,
     )
     print(f"  Samples : {len(dataset):,}")

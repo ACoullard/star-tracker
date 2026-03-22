@@ -15,6 +15,10 @@ Preprocessing:
   2. Re-project all centroids so the guide star sits at the origin.
   3. Map the guide star's catalog ID to a contiguous class index.
 
+Class mapping is driven by filter-catalog.csv (the same catalog used to
+generate the JSON), filtered to the sky partition defined by dec_range.
+This makes class indices stable across partitions and runs.
+
 The `transform` parameter is an augmentation pipeline hook. It receives the
 raw centroid list (list of [x, y] pairs, already re-projected) and returns a
 modified list. Leave as None for the MVP; noise augmentation plugs in here.
@@ -22,7 +26,9 @@ modified list. Leave as None for the MVP; noise augmentation plugs in here.
 
 from __future__ import annotations
 
+import csv
 import json
+import math
 from pathlib import Path
 from typing import Callable
 
@@ -37,6 +43,16 @@ class StarTrackerDataset(Dataset):
     ----------
     path : str | Path
         Path to the JSON data file.
+    catalog_path : str | Path
+        Path to filter-catalog.csv.  Format: ID, spat_x, spat_y, spat_z, mag
+    dec_range : tuple[float, float]
+        (min_deg, max_deg) declination bounds of this sky partition.  The class
+        mapping includes all catalog stars with declination in
+        [min_deg - half_fov, max_deg + half_fov) to cover every star that can
+        appear as a guide star for attitudes within the partition.
+    half_fov : float
+        Half the camera field of view in degrees (default 6.0 for a 12° FOV).
+        Used to pad dec_range when filtering the catalog.
     image_size : int
         Sensor side length in pixels. The image center is taken to be
         (image_size / 2, image_size / 2).
@@ -50,25 +66,31 @@ class StarTrackerDataset(Dataset):
     def __init__(
         self,
         path: str | Path,
+        catalog_path: str | Path,
+        dec_range: tuple[float, float],
+        half_fov: float = 6.0,
         image_size: int = 512,
         transform: Callable | None = None,
     ) -> None:
         self.image_size = image_size
         self.transform = transform
         self._center = image_size / 2.0
+        self._catalog_path = Path(catalog_path)
+        self._dec_range = dec_range
+        self._half_fov = half_fov
 
         with open(path, "r") as f:
             self._samples = json.load(f)
 
-        # Build a stable class mapping from the unique guide-star catalog IDs
-        # found in the dataset.  Sorted for reproducibility.
         self.star_id_to_idx: dict[int, int] = {}
         self.idx_to_star_id: dict[int, int] = {}
-        self._build_class_mapping()
+        self._build_class_mapping(catalog_path, dec_range, half_fov)
 
-    # ------------------------------------------------------------------
-    # Public properties
-    # ------------------------------------------------------------------
+        # Precompute guide star index for every sample once at init.
+        # Avoids recomputing in __getitem__ on every training step.
+        self._guide_indices: list[int] = [
+            self._find_guide_star(s["centroids"]) for s in self._samples
+        ]
 
     @property
     def n_classes(self) -> int:
@@ -86,28 +108,20 @@ class StarTrackerDataset(Dataset):
         centroids: list[list[float]] = sample["centroids"]
         star_ids: list[int] = sample["stars"]
 
-        # Step 1: find guide star (closest centroid to image center)
-        guide_idx = self._find_guide_star(centroids)
+        guide_idx = self._guide_indices[idx]
         guide_x, guide_y = centroids[guide_idx]
 
-        # Step 2: re-project all centroids so guide star is at origin
         reprojected = [
             [x - guide_x, y - guide_y] for x, y in centroids
         ]
 
-        # Step 3: apply augmentation (no-op for MVP)
         if self.transform is not None:
             reprojected = self.transform(reprojected)
 
-        # Step 4: build tensor and label
         centroids_tensor = torch.tensor(reprojected, dtype=torch.float32)
         label = self.star_id_to_idx[star_ids[guide_idx]]
 
         return centroids_tensor, label
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     def _find_guide_star(self, centroids: list[list[float]]) -> int:
         """Return the index of the centroid closest to the image center."""
@@ -121,16 +135,34 @@ class StarTrackerDataset(Dataset):
                 best_idx = i
         return best_idx
 
-    def _build_class_mapping(self) -> None:
-        """Scan the dataset once to collect all guide-star catalog IDs."""
-        guide_star_ids: set[int] = set()
-        for sample in self._samples:
-            centroids = sample["centroids"]
-            star_ids = sample["stars"]
-            guide_idx = self._find_guide_star(centroids)
-            guide_star_ids.add(star_ids[guide_idx])
+    def _build_class_mapping(
+        self,
+        catalog_path: str | Path,
+        dec_range: tuple[float, float],
+        half_fov: float,
+    ) -> None:
+        """
+        Build star_id → class_index mapping from filter-catalog.csv.
 
-        for class_idx, star_id in enumerate(sorted(guide_star_ids)):
+        Only catalog stars with declination in
+        [dec_range[0] - half_fov, dec_range[1] + half_fov) are included.
+        Sorted by star ID for a deterministic, reproducible mapping.
+        """
+        dec_lo = dec_range[0] - half_fov
+        dec_hi = dec_range[1] + half_fov
+
+        star_ids: list[int] = []
+        with open(catalog_path, "r", newline="") as f:
+            reader = csv.reader(f)
+            next(reader)  # skip header
+            for row in reader:
+                star_id = int(row[0])
+                spat_z = float(row[3])
+                dec_deg = math.degrees(math.asin(spat_z))
+                if dec_lo <= dec_deg < dec_hi:
+                    star_ids.append(star_id)
+
+        for class_idx, star_id in enumerate(sorted(star_ids)):
             self.star_id_to_idx[star_id] = class_idx
             self.idx_to_star_id[class_idx] = star_id
 
