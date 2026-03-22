@@ -86,14 +86,14 @@ class SIFTERNEncoder(nn.Module):
             Global-average-pooled encoder output, computed only over valid
             (non-padding) tokens.
         """
-        # (B, n, 2) → (B, n, d_model)
+        # (B, n, 2) -> (B, n, d_model)
         h = self.embedding(x)
 
         # (B, n, d_model) — padding positions attend but do not contribute
         h = self.encoder(h, src_key_padding_mask=src_key_padding_mask)
 
         # Global average pool over valid tokens only
-        # padding_mask is True where padding → invert for valid positions
+        # padding_mask is True where padding -> invert for valid positions
         valid_mask = ~src_key_padding_mask  # (B, n), True = valid
         valid_counts = valid_mask.sum(dim=1, keepdim=True).float()  # (B, 1)
         # Zero out padded positions before summing

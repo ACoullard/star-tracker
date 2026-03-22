@@ -7,7 +7,7 @@ Usage
     python src/train.py --data data/clean-de-0-6.json --epochs 20
 
 The script:
-  1. Loads the dataset and builds the star-ID → class-index mapping.
+  1. Loads the dataset and builds the star-ID -> class-index mapping.
   2. Splits data 90/10 into train and validation sets.
   3. Trains SIFTERN with AdamW + linear warmup + ReduceLROnPlateau.
   4. Saves the best checkpoint (by validation loss) to `--checkpoint-dir`.
@@ -107,8 +107,8 @@ def train_epoch(
     warmup_scheduler: LambdaLR,
     device: torch.device,
     warmup_steps: int,
-    global_step: list[int],
-) -> float:
+    global_step: int,
+) -> tuple[float, int]:
     model.train()
     total_loss = 0.0
 
@@ -121,16 +121,17 @@ def train_epoch(
         logits, _ = model(padded, mask)
         loss = F.cross_entropy(logits, labels)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
         # Advance warmup scheduler while still in warmup phase
-        if global_step[0] < warmup_steps:
+        if global_step < warmup_steps:
             warmup_scheduler.step()
-        global_step[0] += 1
+        global_step += 1
 
         total_loss += loss.item()
 
-    return total_loss / len(loader)
+    return total_loss / len(loader), global_step
 
 
 @torch.no_grad()
@@ -267,7 +268,7 @@ def main() -> None:
 
     # --- Resume ---
     best_val_loss = float("inf")
-    global_step = [0]
+    global_step = 0
     start_epoch = 1
 
     if args.resume and best_checkpoint.exists():
@@ -278,12 +279,12 @@ def main() -> None:
             warmup_scheduler.load_state_dict(ckpt["warmup_scheduler_state_dict"])
         if "plateau_scheduler_state_dict" in ckpt:
             plateau_scheduler.load_state_dict(ckpt["plateau_scheduler_state_dict"])
-        global_step[0] = ckpt.get("global_step", 0)
+        global_step = ckpt.get("global_step", 0)
         start_epoch = ckpt["epoch"] + 1
         best_val_loss = ckpt["val_loss"]
         print(
             f"  Resumed from epoch {ckpt['epoch']}"
-            f"  (global_step={global_step[0]}, val_loss={best_val_loss:.4f})"
+            f"  (global_step={global_step}, val_loss={best_val_loss:.4f})"
         )
     elif args.resume:
         print("  --resume set but no checkpoint found, starting from scratch")
@@ -292,14 +293,14 @@ def main() -> None:
     for epoch in range(start_epoch, args.epochs + 1):
         print(f"\nEpoch {epoch}/{args.epochs}")
 
-        train_loss = train_epoch(
+        train_loss, global_step = train_epoch(
             model, train_loader, optimizer, warmup_scheduler,
             device, args.warmup_steps, global_step,
         )
         val_loss, val_acc = eval_epoch(model, val_loader, device)
 
         # Only hand control to plateau scheduler after warmup
-        if global_step[0] >= args.warmup_steps:
+        if global_step >= args.warmup_steps:
             plateau_scheduler.step(val_loss)
 
         current_lr = optimizer.param_groups[0]["lr"]
@@ -313,9 +314,9 @@ def main() -> None:
             save_checkpoint(
                 best_checkpoint, model, optimizer,
                 warmup_scheduler, plateau_scheduler,
-                epoch, global_step[0], val_loss, dataset,
+                epoch, global_step, val_loss, dataset,
             )
-            print(f"  Saved best checkpoint → {best_checkpoint}")
+            print(f"  Saved best checkpoint -> {best_checkpoint}")
 
     print(f"\nTraining complete. Best val loss: {best_val_loss:.4f}")
 
