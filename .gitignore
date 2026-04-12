@@ -1,4 +1,5 @@
 .git
 data/
 .venv/
+*.local*
 __pycache__/

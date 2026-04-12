@@ -7,7 +7,10 @@ requires-python = ">=3.13"
 dependencies = [
     "torch>=2.0",
     "numpy",
+    "scipy",
     "tqdm",
+    "matplotlib>=3.10.8",
+    "astropy>=7.2.0",
 ]
 
 [tool.uv.sources]
