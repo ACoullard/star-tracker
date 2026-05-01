@@ -20,8 +20,8 @@ generate the JSON), filtered to the sky partition defined by dec_range.
 This makes class indices stable across partitions and runs.
 
 The `transform` parameter is an augmentation pipeline hook. It receives the
-raw centroid list (list of [x, y] pairs, already re-projected) and returns a
-modified list. Leave as None for the MVP; noise augmentation plugs in here.
+re-projected centroid list (list of [x, y] pairs, guide star at [0.0, 0.0])
+and returns a modified list. See CentroidAugmenter in augment.py.
 """
 
 from __future__ import annotations
@@ -91,6 +91,17 @@ class StarTrackerDataset(Dataset):
         self._guide_indices: list[int] = [
             self._find_guide_star(s["centroids"]) for s in self._samples
         ]
+
+    def with_transform(self, transform: Callable | None) -> "StarTrackerDataset":
+        """Return a shallow copy of this dataset with a different transform.
+
+        All heavy data (_samples, _guide_indices, catalog mappings) is shared
+        in memory — only the transform attribute differs.
+        """
+        import copy
+        ds = copy.copy(self)
+        ds.transform = transform
+        return ds
 
     @property
     def n_classes(self) -> int:

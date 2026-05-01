@@ -23,7 +23,7 @@ import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR, ReduceLROnPlateau
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 from data import StarTrackerDataset, collate_fn
@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--image-size",
         type=int,
-        default=512,
+        default=500,
         help="Sensor side length in pixels (used to locate the image center)",
     )
     parser.add_argument("--num-workers", type=int, default=4)
@@ -79,6 +79,35 @@ def parse_args() -> argparse.Namespace:
         "--resume",
         action="store_true",
         help="Resume training from the best checkpoint in --checkpoint-dir",
+    )
+    # Augmentation
+    parser.add_argument(
+        "--augment",
+        action="store_true",
+        help="Apply centroid perturbations during training and validation",
+    )
+    parser.add_argument(
+        "--centroid-sigma",
+        type=float,
+        default=5.0,
+        help="Std dev of Gaussian position noise in pixels (default 5.0)",
+    )
+    parser.add_argument(
+        "--max-false-stars",
+        type=int,
+        default=5,
+        help="Max number of false stars injected per scene (default 5)",
+    )
+    parser.add_argument(
+        "--drop-prob",
+        type=float,
+        default=0.0,
+        help="Per-star drop probability for non-guide centroids (default 0.0)",
+    )
+    parser.add_argument(
+        "--clean-val",
+        action="store_true",
+        help="Also run an unaugmented validation pass each epoch (informational only)",
     )
     return parser.parse_args()
 
@@ -212,23 +241,45 @@ def main() -> None:
     # --- Dataset ---
     print("Loading dataset...")
     dec_range = tuple(args.dec_range)
-    dataset = StarTrackerDataset(
+    base_dataset = StarTrackerDataset(
         path=args.data,
         catalog_path=args.catalog,
         dec_range=dec_range,
         half_fov=args.half_fov,
         image_size=args.image_size,
     )
-    print(f"  Samples : {len(dataset):,}")
-    print(f"  Classes : {dataset.n_classes}")
+    print(f"  Samples : {len(base_dataset):,}")
+    print(f"  Classes : {base_dataset.n_classes}")
 
-    val_size = max(1, int(0.1 * len(dataset)))
-    train_size = len(dataset) - val_size
-    train_ds, val_ds = random_split(
-        dataset,
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(42),
-    )
+    # Reproducible index split
+    val_size = max(1, int(0.1 * len(base_dataset)))
+    perm = torch.randperm(
+        len(base_dataset), generator=torch.Generator().manual_seed(42)
+    ).tolist()
+    train_indices = perm[:-val_size]
+    val_indices = perm[-val_size:]
+
+    # Build augmenter and augmented dataset view if requested
+    augmenter = None
+    if args.augment:
+        from augment import CentroidAugmenter
+        augmenter = CentroidAugmenter(
+            image_size=args.image_size,
+            centroid_sigma=args.centroid_sigma,
+            max_false_stars=args.max_false_stars,
+            drop_prob=args.drop_prob,
+        )
+        print(
+            f"  Augment : sigma={args.centroid_sigma}px  "
+            f"false_stars=[0,{args.max_false_stars}]  "
+            f"drop_prob={args.drop_prob}"
+        )
+        aug_dataset = base_dataset.with_transform(augmenter)
+        train_ds = Subset(aug_dataset, train_indices)
+        val_ds = Subset(aug_dataset, val_indices)
+    else:
+        train_ds = Subset(base_dataset, train_indices)
+        val_ds = Subset(base_dataset, val_indices)
 
     train_loader = DataLoader(
         train_ds,
@@ -247,8 +298,21 @@ def main() -> None:
         pin_memory=(device.type == "cuda"),
     )
 
+    # Optional clean (unaugmented) validation loader
+    clean_val_loader = None
+    if args.augment and args.clean_val:
+        clean_val_ds = Subset(base_dataset, val_indices)
+        clean_val_loader = DataLoader(
+            clean_val_ds,
+            batch_size=args.batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+            num_workers=args.num_workers,
+            pin_memory=(device.type == "cuda"),
+        )
+
     # --- Model ---
-    model = SIFTERN(n_classes=dataset.n_classes).to(device)
+    model = SIFTERN(n_classes=base_dataset.n_classes).to(device)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"  Params  : {total_params:,}")
 
@@ -309,12 +373,18 @@ def main() -> None:
             f"  val_acc={val_acc*100:.2f}%  lr={current_lr:.2e}"
         )
 
+        if clean_val_loader is not None:
+            clean_loss, clean_acc = eval_epoch(model, clean_val_loader, device)
+            print(
+                f"  clean_val_loss={clean_loss:.4f}  clean_val_acc={clean_acc*100:.2f}%"
+            )
+
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             save_checkpoint(
                 best_checkpoint, model, optimizer,
                 warmup_scheduler, plateau_scheduler,
-                epoch, global_step, val_loss, dataset,
+                epoch, global_step, val_loss, base_dataset,
             )
             print(f"  Saved best checkpoint -> {best_checkpoint}")
 
