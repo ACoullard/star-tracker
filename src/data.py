@@ -69,7 +69,7 @@ class StarTrackerDataset(Dataset):
         catalog_path: str | Path,
         dec_range: tuple[float, float],
         half_fov: float = 6.0,
-        image_size: int = 512,
+        image_size: int = 500,
         transform: Callable | None = None,
     ) -> None:
         self.image_size = image_size

@@ -1,7 +1,7 @@
 """
 Render a simulated star tracker scene from the dataset.
 
-Camera defaults (image_size=512, half_fov=6.0) match the training configuration
+Camera defaults (image_size=500, half_fov=6.0) match the training configuration
 defined in src/data.py and src/train.py. Change them only if you retrain with
 different settings.
 """
@@ -72,9 +72,9 @@ def parse_args() -> argparse.Namespace:
     cam.add_argument(
         "--image-size",
         type=int,
-        default=512,
+        default=500,
         metavar="INT",
-        help="Sensor side length in pixels (default: 512)",
+        help="Sensor side length in pixels (default: 500)",
     )
     cam.add_argument(
         "--half-fov",

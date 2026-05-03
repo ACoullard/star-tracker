@@ -29,7 +29,7 @@ class CentroidAugmenter:
 
     def __init__(
         self,
-        image_size: int = 512,
+        image_size: int = 500,
         centroid_sigma: float = 5.0,
         max_false_stars: int = 5,
         drop_prob: float = 0.0,
@@ -69,8 +69,7 @@ class CentroidAugmenter:
         noised_others = [
             noised
             for c in others
-            for noised in (self._noise(c, bounds_check=True),)
-            if noised is not None
+            if (noised := self._noise(c, bounds_check=True)) is not None
         ]
 
         if self.drop_prob > 0.0:
@@ -80,6 +79,7 @@ class CentroidAugmenter:
 
         false_stars = self._make_false_stars()
 
+        assert noised_guide is not None
         return [noised_guide] + noised_others + false_stars
 
     # ------------------------------------------------------------------
